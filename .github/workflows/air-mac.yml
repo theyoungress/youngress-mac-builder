@@ -1,0 +1,71 @@
+name: AIR macOS
+
+# Builds AIR for macOS on GitHub's free public-repo Mac runners, like ironglass-mac.yml: the private
+# source comes in with a read-only deploy key, all output goes to a log in a private draft release,
+# and the finished package is a private draft too.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  air:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/AIR
+          ssh-key: ${{ secrets.AIR_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, sign, validate (auval) and package
+        working-directory: src
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4
+          phase "adapter test (parameters, engine-exact audio, state, licence, editor)"
+          quiet build-macos/PortableTest
+          phase "check bundles, ad-hoc sign"
+          vst3=build-macos/macOS/AIR.vst3
+          au="$(find build-macos -type d -name 'AIR.component' | head -1)"
+          for b in "$vst3" "$au"; do
+            archs=$(lipo -archs "$b/Contents/MacOS/AIR"); echo "$b: $archs" >> "$log"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            quiet codesign --force --sign - "$b"
+            quiet codesign --verify --strict "$b"
+          done
+          nm -gU "$vst3/Contents/MacOS/AIR" | grep -q _GetPluginFactory
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/AIR.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx YAir YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase package
+          version=$(sed -nE 's/^#define AIR_VERSION "([0-9.]+)".*/\1/p' Source/Version.h)
+          mkdir -p pkg/AIR
+          ditto "$vst3" pkg/AIR/AIR.vst3
+          ditto "$au" pkg/AIR/AIR.component
+          ditto -c -k --sequesterRsrc --keepParent pkg/AIR "$RUNNER_TEMP/AIR-$version-Mac.zip"
+          phase "done: AIR $version"
+
+      - name: Stage the package and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/AIR-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "air-mac-${{ github.run_id }}" --draft --title "AIR macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
