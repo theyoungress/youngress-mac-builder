@@ -1,0 +1,67 @@
+name: IRON & GLASS macOS
+
+# Builds IRON & GLASS for macOS on GitHub's free public-repo Mac runners. This repo holds no plug-in
+# code: the private source is checked out with a read-only deploy key, every build, test and
+# validation output goes to a log that is attached to a private draft release (never to this
+# public log), and the finished package is a private draft release too.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ironglass:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/IronGlassChannelMacBuild
+          ssh-key: ${{ secrets.IRONGLASS_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, sign, validate (auval) and package
+        working-directory: src
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DIG_BUILD_PORTABLE=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4
+          phase "tests (VST3 factory, shared processor)"   # CLAP is not shipped and its probe can hang
+          quiet ctest --test-dir build-macos -C Release --output-on-failure --timeout 300 -E CompiledCLAP
+          phase "ad-hoc sign and check bundles"
+          quiet bash Tools/sign-macos.sh build-macos
+          quiet python3 Tools/package-macos.py --build-dir build-macos --output-dir macOS-artifacts --validate-only
+          phase "auval"
+          vst3="$(find build-macos -type d -name 'Iron & Glass Channel.vst3' | head -1)"
+          au="$(find build-macos -type d -name 'IRON & GLASS.component' | head -1)"
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/"IRON & GLASS.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx IrGl YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase package
+          version=$(sed -nE 's/^project\(IronGlassChannel VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          mkdir -p "pkg/IRON & GLASS"
+          ditto "$vst3" "pkg/IRON & GLASS/Iron & Glass Channel.vst3"
+          ditto "$au" "pkg/IRON & GLASS/IRON & GLASS.component"
+          ditto -c -k --sequesterRsrc --keepParent "pkg/IRON & GLASS" "$RUNNER_TEMP/IRONGLASS-$version-Mac.zip"
+          phase "done: IRON & GLASS $version"
+
+      - name: Stage the package and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/IRONGLASS-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "ironglass-mac-${{ github.run_id }}" --draft --title "IRON & GLASS macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
