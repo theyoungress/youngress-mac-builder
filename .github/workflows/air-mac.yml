@@ -44,7 +44,8 @@ jobs:
             quiet codesign --force --sign - "$b"
             quiet codesign --verify --strict "$b"
           done
-          nm -gU "$vst3/Contents/MacOS/AIR" | grep -q _GetPluginFactory
+          nm -gU "$vst3/Contents/MacOS/AIR" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
           phase auval
           mkdir -p ~/Library/Audio/Plug-Ins/Components
           quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/AIR.component
