@@ -1,0 +1,54 @@
+name: Young Ress Hub macOS
+
+# Builds the Young Ress Hub Mac installer (.dmg and the .zip the hub updates itself from) on the free
+# public-repo Mac runners. The private hub source comes in with a read-only deploy key; the build log
+# and the installers go to a private draft release, never to this public log.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Hub commit or branch"
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  hub:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/youngress-hub
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.HUB_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the Mac installer
+        working-directory: src
+        timeout-minutes: 35
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          echo "== npm ci"; npm ci >> "$log" 2>&1
+          echo "== electron-builder --mac"; npx electron-builder --mac --publish never >> "$log" 2>&1
+          mkdir -p "$RUNNER_TEMP/out"
+          cp dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml "$RUNNER_TEMP/out/"
+          ls -la "$RUNNER_TEMP/out" | tee -a "$log"
+
+      - name: Stage the installers and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/out/*; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "hub-mac-${{ github.run_id }}" --draft --title "Young Ress Hub macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}." "${files[@]}" -R "$GITHUB_REPOSITORY"
