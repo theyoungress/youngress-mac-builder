@@ -54,6 +54,9 @@ jobs:
           ditto "$vst3" "pkg/IRON & GLASS/Iron & Glass Channel.vst3"
           ditto "$au" "pkg/IRON & GLASS/IRON & GLASS.component"
           ditto -c -k --sequesterRsrc --keepParent "pkg/IRON & GLASS" "$RUNNER_TEMP/IRONGLASS-$version-Mac.zip"
+          for b in "pkg/IRON & GLASS/"*; do ls "$b/Contents/Resources/"{Hardware,Sprites,VUFace}.igz > /dev/null; done
+          size=$(stat -f%z "$RUNNER_TEMP/IRONGLASS-$version-Mac.zip"); phase "package size: $((size / 1048576)) MB"
+          [ "$size" -lt 50000000 ]   # the store's per-file upload limit
           phase "done: IRON & GLASS $version"
 
       - name: Stage the package and log as a private draft release
