@@ -58,6 +58,7 @@ jobs:
           mkdir -p pkg/AIR
           ditto "$vst3" pkg/AIR/AIR.vst3
           ditto "$au" pkg/AIR/AIR.component
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "release/Install on Mac.txt" pkg/AIR/
           ditto -c -k --sequesterRsrc --keepParent pkg/AIR "$RUNNER_TEMP/AIR-$version-Mac.zip"
           [ "$(stat -f%z "$RUNNER_TEMP/AIR-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
           phase "done: AIR $version"
