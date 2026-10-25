@@ -1,0 +1,91 @@
+name: TRINITY macOS
+
+# Builds TRINITY for macOS on GitHub's free public-repo Mac runners, like ironglass-mac.yml: the private
+# source comes in with a read-only deploy key, all output goes to a log in a private draft release,
+# and the finished package is a private draft too. Same steps as the TRINITY repo's own mac job, except
+# the licensed test-host run (it needs the store's signing key, which stays out of this public repo):
+# here machost runs unlicensed as a smoke test, and the VST3 validator and auval gate the build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VST3_SDK_TAG: v3.8.1_build_84
+
+jobs:
+  trinity:
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/TRINITY
+          ssh-key: ${{ secrets.TRINITY_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, validate (VST3 validator, auval), sign and package
+        working-directory: src
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase "fetch VST 3 SDK and Apple AudioUnitSDK"
+          quiet git clone --depth 1 --branch "$VST3_SDK_TAG" https://github.com/steinbergmedia/vst3sdk external/vst3sdk
+          quiet git -C external/vst3sdk submodule update --init --depth 1 base cmake pluginterfaces public.sdk
+          quiet git clone --depth 1 --branch AudioUnitSDK-1.3.0 https://github.com/apple/AudioUnitSDK external/AudioUnitSDK
+          phase configure
+          quiet cmake -G Xcode -B build/mac -DCMAKE_BUILD_TYPE=Release
+          phase "build (the VST3 validator runs as part of the build)"
+          quiet cmake --build build/mac --config Release -- -quiet
+          VST3=$(find build/mac -path "*Release/TRINITY.vst3" -maxdepth 4 -type d | head -1)
+          AU=$(find build/mac -path "*Release/TRINITY.component" -maxdepth 4 -type d | head -1)
+          HOST=$(find build/mac -name machost -type f -perm -111 | head -1)
+          archs=$(lipo -archs "$VST3/Contents/MacOS/TRINITY"); echo "VST3: $archs" >> "$log"
+          [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+          phase "machost smoke run (unlicensed: audio passes through)"
+          mkdir -p "$RUNNER_TEMP/out"
+          "$HOST" "$VST3" testdata/vocadito_10.wav "$RUNNER_TEMP/out" >> "$log" 2>&1 || echo "machost exit $?" >> "$log"
+          phase "package (self-contained AU, stripped, ad-hoc signed)"
+          VER=$(sed -n 's/#define TRINITY_VERSION_STR "\(.*\)"/\1/p' src/TrinityPlugin.h)
+          P="pkg/TRINITY-$VER-Mac"
+          mkdir -p "$P"
+          ditto "$VST3" "$P/TRINITY.vst3"
+          ditto "$AU" "$P/TRINITY.component"
+          rm -rf "$P/TRINITY.component/Contents/Resources/plugin.vst3"
+          ditto "$VST3" "$P/TRINITY.component/Contents/Resources/plugin.vst3"
+          for B in "$P/TRINITY.vst3/Contents/MacOS/TRINITY" "$P/TRINITY.component/Contents/MacOS/TRINITY" "$P/TRINITY.component/Contents/Resources/plugin.vst3/Contents/MacOS/TRINITY"; do
+            strip -x "$B"
+          done
+          quiet codesign --force --sign - "$P/TRINITY.vst3"
+          quiet codesign --force --sign - "$P/TRINITY.component/Contents/Resources/plugin.vst3"
+          quiet codesign --force --sign - "$P/TRINITY.component"
+          quiet codesign --verify --deep --strict "$P/TRINITY.vst3" "$P/TRINITY.component"
+          cp "mac/Install on Mac.txt" release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "$P/"
+          cp external/AudioUnitSDK/LICENSE.txt "$P/AudioUnitSDK-LICENSE.txt"
+          find "$P" -name "._*" -delete
+          (cd pkg && ditto -c -k --norsrc --noextattr --keepParent "TRINITY-$VER-Mac" "$RUNNER_TEMP/TRINITY-$VER-Mac.zip")
+          [ "$(stat -f%z "$RUNNER_TEMP/TRINITY-$VER-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          rm -rf ~/Library/Audio/Plug-Ins/Components/TRINITY.component
+          ditto "$P/TRINITY.component" ~/Library/Audio/Plug-Ins/Components/TRINITY.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx Trin YgRs > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase "done: TRINITY $VER"
+
+      - name: Stage the package and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/TRINITY-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "trinity-mac-${{ github.run_id }}" --draft --title "TRINITY macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
