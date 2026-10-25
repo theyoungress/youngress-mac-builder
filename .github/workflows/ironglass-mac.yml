@@ -55,7 +55,7 @@ jobs:
           ditto "$au" "pkg/IRON & GLASS/IRON & GLASS.component"
           cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "release/Install on Mac.txt" "pkg/IRON & GLASS/"
           ditto -c -k --sequesterRsrc --keepParent "pkg/IRON & GLASS" "$RUNNER_TEMP/IRONGLASS-$version-Mac.zip"
-          for b in "pkg/IRON & GLASS/"*; do ls "$b/Contents/Resources/"{Hardware,Sprites,VUFace}.igz > /dev/null; done
+          for b in "pkg/IRON & GLASS/"*.vst3 "pkg/IRON & GLASS/"*.component; do ls "$b/Contents/Resources/"{Hardware,Sprites,VUFace}.igz > /dev/null; done
           size=$(stat -f%z "$RUNNER_TEMP/IRONGLASS-$version-Mac.zip"); phase "package size: $((size / 1048576)) MB"
           [ "$size" -lt 50000000 ]   # the store's per-file upload limit
           phase "done: IRON & GLASS $version"
