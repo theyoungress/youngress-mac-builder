@@ -1,0 +1,74 @@
+name: MONDAY macOS
+
+# Builds the MONDAY app for macOS on GitHub's free public-repo Mac runners, like the plug-in jobs:
+# the private source comes in with a read-only deploy key, every line of output goes to a log in a
+# private draft release (never this public log), and the finished app is a private draft too.
+# Universal (Apple silicon + Intel), ad-hoc signed. The headless tests run first; a short launch of
+# the app takes a screenshot as a smoke test.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  monday:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/MONDAY
+          ssh-key: ${{ secrets.MONDAY_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, smoke-run, sign and package
+        working-directory: src
+        timeout-minutes: 110
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -G Xcode -B build/mac -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          phase "build the tests"
+          quiet cmake --build build/mac --config Release --target MondayTests -- -quiet
+          TESTS=$(find build/mac -name MondayTests -type f -perm -111 | head -1)
+          phase "headless tests"
+          "$TESTS" > "$RUNNER_TEMP/tests.txt" 2>&1 || true
+          tail -40 "$RUNNER_TEMP/tests.txt" >> "$log"
+          grep "checks passed" "$RUNNER_TEMP/tests.txt" | tee -a "$log" || true
+          phase "build the app"
+          quiet cmake --build build/mac --config Release --target MONDAY -- -quiet
+          APP=$(find build/mac -name MONDAY.app -type d -path "*Release*" | head -1)
+          archs=$(lipo -archs "$APP/Contents/MacOS/MONDAY"); echo "app: $archs" >> "$log"
+          [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+          phase "package (stripped, ad-hoc signed)"
+          VER=$(sed -n 's/^project(MONDAY VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          P="pkg/MONDAY"
+          mkdir -p "$P"
+          ditto "$APP" "$P/MONDAY.app"
+          strip -x "$P/MONDAY.app/Contents/MacOS/MONDAY"
+          quiet codesign --force --deep --sign - "$P/MONDAY.app"
+          quiet codesign --verify --deep --strict "$P/MONDAY.app"
+          cp "mac/Read Me (Mac).txt" release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "$P/"
+          find "$P" -name "._*" -delete
+          (cd pkg && ditto -c -k --norsrc --noextattr --keepParent MONDAY "$RUNNER_TEMP/MONDAY-$VER-Mac.zip")
+          [ "$(stat -f%z "$RUNNER_TEMP/MONDAY-$VER-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "smoke run: open a vocal session, screenshot, quit"
+          perl -e 'alarm 120; exec @ARGV' "$P/MONDAY.app/Contents/MacOS/MONDAY" --vocal rap --master-db -60 --wait 4000 \
+            --screenshot "$RUNNER_TEMP/mac-smoke.png" >> "$log" 2>&1 || echo "smoke run exit $?" >> "$log"
+          [ -f "$RUNNER_TEMP/mac-smoke.txt" ] && cat "$RUNNER_TEMP/mac-smoke.txt" >> "$log"
+          phase "done: MONDAY $VER"
+
+      - name: Stage the package, tests and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/MONDAY-*-Mac.zip "$RUNNER_TEMP/tests.txt" "$RUNNER_TEMP/mac-smoke.png"; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "monday-mac-${{ github.run_id }}" --draft --title "MONDAY macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal app, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
