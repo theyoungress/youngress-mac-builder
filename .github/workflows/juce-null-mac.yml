@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 jobs:
-  null:
+  compare:
     strategy:
       fail-fast: false
       matrix:
