@@ -5,18 +5,23 @@ name: AIR macOS
 # and the finished package is a private draft too.
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
 
 permissions:
   contents: write
 
 jobs:
   air:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           repository: theyoungress/AIR
+          ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.AIR_SOURCE_KEY }}
           persist-credentials: false
           path: src

@@ -1,0 +1,75 @@
+name: JUCE null macOS
+
+# Builds each plug-in's adapter test on two JUCE commits and compares the audio sample for sample, so a
+# JUCE move can be proved silent on a Mac. Private source comes in with a read-only deploy key; hashes,
+# logs and editor renders go to a private draft release, never to this public log.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
+      old_juce:
+        description: "JUCE commit to compare against"
+        default: 51a8a6d7aeae7326956d747737ccf1575e61e209
+      new_juce:
+        description: "JUCE commit under test"
+        default: dabd5ad13cd869cba41046947fffc8e5ce5cd662
+
+permissions:
+  contents: write
+
+jobs:
+  null:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: air, repo: theyoungress/AIR, key: AIR_SOURCE_KEY, flag: AIR, target: PortableTest }
+          - { name: ironglass, repo: theyoungress/IronGlassChannelMacBuild, key: IRONGLASS_SOURCE_KEY, flag: IG, target: PortableAdapterTests }
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets[matrix.key] }}
+          persist-credentials: false
+          path: src
+
+      - name: Build on both JUCE commits and compare
+        working-directory: src
+        timeout-minutes: 55
+        env:
+          OLD_JUCE: ${{ inputs.old_juce }}
+          NEW_JUCE: ${{ inputs.new_juce }}
+          FLAG: ${{ matrix.flag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          for side in old new; do
+            [ "$side" = old ] && commit="$OLD_JUCE" || commit="$NEW_JUCE"
+            echo "== $side" | tee -a "$log"
+            git clone -q --filter=blob:none https://github.com/juce-framework/JUCE "$RUNNER_TEMP/juce-$side" >> "$log" 2>&1
+            git -C "$RUNNER_TEMP/juce-$side" checkout -q "$commit" >> "$log" 2>&1
+            cmake -S . -B "build-$side" -DCMAKE_BUILD_TYPE=Release "-D${FLAG}_BUILD_PORTABLE=ON" "-D${FLAG}_JUCE_SOURCE=$RUNNER_TEMP/juce-$side" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64 >> "$log" 2>&1
+            cmake --build "build-$side" --config Release --target "$TARGET" --parallel 4 >> "$log" 2>&1
+            exe=$(find "build-$side" -type f -perm +111 -name "$TARGET" | head -1)
+            PORTABLE_AUDIO_DUMP="$RUNNER_TEMP/$side.f32" "$exe" >> "$log" 2>&1
+            "$exe" "$RUNNER_TEMP/shots/$side" >> "$log" 2>&1 || echo "editor renders failed on $side" >> "$log"
+          done
+          (cd "$RUNNER_TEMP" && ls -l old.f32 new.f32 && shasum -a 256 old.f32 new.f32) >> "$log"
+          cmp "$RUNNER_TEMP/old.f32" "$RUNNER_TEMP/new.f32" >> "$log" 2>&1
+          echo "NULL: bit-identical" | tee -a "$log"
+
+      - name: Stage the log and renders as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          if [ -d "$RUNNER_TEMP/shots" ]; then (cd "$RUNNER_TEMP" && zip -qr shots.zip shots); files+=("$RUNNER_TEMP/shots.zip"); fi
+          gh release create "juce-null-${{ matrix.name }}-${{ github.run_id }}" --draft --title "JUCE null ${{ matrix.name }} (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}." "${files[@]}" -R "$GITHUB_REPOSITORY"
