@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
           path: src
 
-      - name: Build, test, sign, validate (auval) and package
+      - name: Build, test, sign, validate (auval, host test) and package
         working-directory: src
         timeout-minutes: 45
         run: |
@@ -60,6 +60,8 @@ jobs:
           auval -v aufx Hadl YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
           cat "$RUNNER_TEMP/auval.txt" >> "$log"
           grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase "host test (JUCE's plug-in host loads the VST3 and the Audio Unit: audio, state, the editor in a window)"
+          quiet build-macos/JuceHostTest "$vst3" "$RUNNER_TEMP/shots"
           phase package
           version=$(sed -nE 's/^#define HADAL_VERSION "([0-9.]+)".*/\1/p' Source/Version.h)
           mkdir -p pkg/HADAL
