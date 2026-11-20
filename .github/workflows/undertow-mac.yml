@@ -1,0 +1,80 @@
+name: UNDERTOW macOS
+
+# Builds UNDERTOW for macOS on GitHub's free public-repo Mac runners, like air-mac.yml: the private
+# source comes in with a read-only deploy key, all output goes to a log in a private draft release,
+# and the finished package is a private draft too.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  undertow:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/undertow
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.UNDERTOW_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, sign, validate (auval) and package
+        working-directory: src
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4
+          phase "adapter test (parameters, engine-exact audio, programs, layouts, state, meter, editor)"
+          mkdir -p "$RUNNER_TEMP/shots"
+          quiet build-macos/PortableTest "$RUNNER_TEMP/shots"
+          phase "check bundles, ad-hoc sign"
+          vst3=build-macos/macOS/UNDERTOW.vst3
+          au="$(find build-macos -type d -name 'UNDERTOW.component' | head -1)"
+          for b in "$vst3" "$au"; do
+            archs=$(lipo -archs "$b/Contents/MacOS/UNDERTOW"); echo "$b: $archs" >> "$log"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            quiet codesign --force --sign - "$b"
+            quiet codesign --verify --strict "$b"
+          done
+          nm -gU "$vst3/Contents/MacOS/UNDERTOW" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/UNDERTOW.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx YUtw YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase package
+          version=$(sed -nE 's/^#define UNDERTOW_VERSION "([0-9.]+)".*/\1/p' Source/Version.h)
+          mkdir -p pkg/UNDERTOW
+          ditto "$vst3" pkg/UNDERTOW/UNDERTOW.vst3
+          ditto "$au" pkg/UNDERTOW/UNDERTOW.component
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "release/Install on Mac.txt" pkg/UNDERTOW/
+          ditto -c -k --sequesterRsrc --keepParent pkg/UNDERTOW "$RUNNER_TEMP/UNDERTOW-$version-Mac.zip"
+          [ "$(stat -f%z "$RUNNER_TEMP/UNDERTOW-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "done: UNDERTOW $version"
+
+      - name: Stage the package, editor pictures and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/UNDERTOW-*-Mac.zip "$RUNNER_TEMP"/shots/*.png; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "undertow-mac-${{ github.run_id }}" --draft --title "UNDERTOW macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
