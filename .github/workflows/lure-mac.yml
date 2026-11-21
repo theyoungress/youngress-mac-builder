@@ -1,0 +1,86 @@
+name: LURE macOS
+
+# Builds LURE for macOS on GitHub's free public-repo Mac runners, like hadal-mac.yml: the private
+# source comes in with a read-only deploy key, all output goes to a log in a private draft release,
+# and the finished package is a private draft too (with pictures of the editor as the Mac drew it).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  lure:
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/LURE
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.LURE_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, sign, validate (auval, host test) and package
+        working-directory: src
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4 -- -k
+          phase "engine test (every published number, both units, stability, every rate) on this Mac's processor"
+          quiet build-macos/EngineTest
+          phase "glitch test (clicks on every control and preset change, block sizes, rates, the ends of the controls)"
+          quiet build-macos/GlitchTest
+          phase "adapter test (parameters, engine-exact audio, state, editor drawing, repaint areas, mouse and keys)"
+          quiet build-macos/PortableTest "$RUNNER_TEMP/shots"
+          phase "check bundles, ad-hoc sign"
+          vst3=build-macos/macOS/LURE.vst3
+          au="$(find build-macos -type d -name 'LURE.component' | head -1)"
+          for b in "$vst3" "$au"; do
+            archs=$(lipo -archs "$b/Contents/MacOS/LURE"); echo "$b: $archs" >> "$log"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            quiet codesign --force --sign - "$b"
+            quiet codesign --verify --strict "$b"
+          done
+          nm -gU "$vst3/Contents/MacOS/LURE" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/LURE.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx Lure YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase "host test (JUCE's plug-in host loads the VST3 and the Audio Unit: audio, state, the editor in a window)"
+          quiet build-macos/JuceHostTest "$vst3" "$RUNNER_TEMP/shots"
+          phase package
+          version=$(sed -nE 's/^#define LURE_VERSION "([0-9.]+)".*/\1/p' Source/Version.h)
+          mkdir -p pkg/LURE
+          ditto "$vst3" pkg/LURE/LURE.vst3
+          ditto "$au" pkg/LURE/LURE.component
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt release/README.txt "release/Install on Mac.txt" pkg/LURE/
+          ditto -c -k --sequesterRsrc --keepParent pkg/LURE "$RUNNER_TEMP/LURE-$version-Mac.zip"
+          [ "$(stat -f%z "$RUNNER_TEMP/LURE-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "done: LURE $version"
+
+      - name: Stage the package, the editor pictures and the log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/LURE-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          if [ -d "$RUNNER_TEMP/shots" ]; then (cd "$RUNNER_TEMP" && zip -q -r editor-pictures.zip shots) && files+=("$RUNNER_TEMP/editor-pictures.zip"); fi
+          gh release create "lure-mac-${{ github.run_id }}" --draft --title "LURE macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
