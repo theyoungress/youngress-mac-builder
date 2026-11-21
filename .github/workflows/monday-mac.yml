@@ -4,7 +4,8 @@ name: MONDAY macOS
 # the private source comes in with a read-only deploy key, every line of output goes to a log in a
 # private draft release (never this public log), and the finished app is a private draft too.
 # Universal (Apple silicon + Intel), ad-hoc signed. The headless tests run first; a short launch of
-# the app takes a screenshot as a smoke test.
+# the app takes a screenshot as a smoke test. Music DNA's made-up benches run too (no sample libraries
+# here), and its in-app tests on made-up sounds, so their figures can be set against Windows'.
 on:
   workflow_dispatch:
 
@@ -40,6 +41,12 @@ jobs:
           "$TESTS" > "$RUNNER_TEMP/tests.txt" 2>&1 || true
           tail -40 "$RUNNER_TEMP/tests.txt" >> "$log"
           grep "checks passed" "$RUNNER_TEMP/tests.txt" | tee -a "$log" || true
+          phase "Music DNA: the made-up benches (set against the same runs on Windows)"
+          "$TESTS" --dna-conditions > "$RUNNER_TEMP/dna-conditions.txt" 2>&1 || echo "dna-conditions exit $?" >> "$log"
+          "$TESTS" --dna-bench none none > "$RUNNER_TEMP/dna-bench.txt" 2>&1 || echo "dna-bench exit $?" >> "$log"
+          "$TESTS" --drum-bench none > "$RUNNER_TEMP/drum-bench.txt" 2>&1 || echo "drum-bench exit $?" >> "$log"
+          "$TESTS" --harmony-bench none > "$RUNNER_TEMP/harmony-bench.txt" 2>&1 || echo "harmony-bench exit $?" >> "$log"
+          "$TESTS" --write-made-up "$RUNNER_TEMP/madeup" >> "$log" 2>&1 || echo "write-made-up exit $?" >> "$log"
           phase "build the app"
           quiet cmake --build build/mac --config Release --target MONDAY -- -quiet
           APP=$(find build/mac -name MONDAY.app -type d -path "*Release*" | head -1)
@@ -61,6 +68,14 @@ jobs:
           perl -e 'alarm 120; exec @ARGV' "$P/MONDAY.app/Contents/MacOS/MONDAY" --vocal rap --master-db -60 --wait 4000 \
             --screenshot "$RUNNER_TEMP/mac-smoke.png" >> "$log" 2>&1 || echo "smoke run exit $?" >> "$log"
           [ -f "$RUNNER_TEMP/mac-smoke.txt" ] && cat "$RUNNER_TEMP/mac-smoke.txt" >> "$log"
+          phase "Music DNA in the app: Convert to MIDI and the listening job on the made-up sounds"
+          D="$RUNNER_TEMP/dna-app"; mkdir -p "$D"
+          for t in "tomidi-melody||singer.wav|--to-midi-test" "tomidi-drums|drums|drums.wav|--to-midi-test" "tomidi-harmony|harmony|piano.wav|--to-midi-test"                    "tomidi-chords|chords|piano.wav|--to-midi-test" "listen||piano.wav|--listen-test"; do
+            IFS='|' read -r name what sound flag <<< "$t"
+            MONDAY_MIDI_WHAT="$what" perl -e 'alarm 300; exec @ARGV' "$P/MONDAY.app/Contents/MacOS/MONDAY" "$RUNNER_TEMP/madeup/$sound" "$flag" --master-db -60               --screenshot "$D/$name.png" >> "$log" 2>&1 || echo "$name exit $?" >> "$log"
+          done
+          for f in "$D"/*.txt; do [ -f "$f" ] && { echo "-- $(basename "$f")"; cat "$f"; } >> "$log"; done
+          (cd "$D" && zip -q -r "$RUNNER_TEMP/dna-app.zip" .) || true
           phase "done: MONDAY $VER"
 
       - name: Stage the package, tests and log as a private draft release
@@ -69,6 +84,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=("$RUNNER_TEMP/build.log")
-          for f in "$RUNNER_TEMP"/MONDAY-*-Mac.zip "$RUNNER_TEMP/tests.txt" "$RUNNER_TEMP/mac-smoke.png"; do [ -f "$f" ] && files+=("$f"); done
+          for f in "$RUNNER_TEMP"/MONDAY-*-Mac.zip "$RUNNER_TEMP/tests.txt" "$RUNNER_TEMP/mac-smoke.png" "$RUNNER_TEMP"/dna-conditions.txt "$RUNNER_TEMP"/dna-bench.txt                    "$RUNNER_TEMP"/drum-bench.txt "$RUNNER_TEMP"/harmony-bench.txt "$RUNNER_TEMP"/dna-app.zip; do [ -f "$f" ] && files+=("$f"); done
           gh release create "monday-mac-${{ github.run_id }}" --draft --title "MONDAY macOS (run ${{ github.run_id }})" \
             --notes "Job status: ${{ job.status }}. Universal app, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
