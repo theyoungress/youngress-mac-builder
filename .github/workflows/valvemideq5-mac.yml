@@ -1,6 +1,6 @@
-name: VALVE MID EQ-5 macOS
+name: EQ-5 macOS
 
-# Builds VALVE MID EQ-5 (a JUCE 8 + CMake project) for macOS on GitHub's free public-repo Mac runners, like
+# Builds EQ-5 (a JUCE 8 + CMake project) for macOS on GitHub's free public-repo Mac runners, like
 # the other *-mac.yml here: the private source comes in with a read-only deploy key, all output goes
 # to a log in a private draft release, and the finished package is a private draft too.
 on:
@@ -39,7 +39,7 @@ jobs:
           phase build
           quiet cmake --build build-macos --config Release --parallel 4 --target VME5_VST3 VME5_AU VMETests VMEHostTest VMESnapshot
           art=build-macos/VME5_artefacts/Release
-          vst3="$art/VST3/VALVE MID EQ-5.vst3"; au="$art/AU/VALVE MID EQ-5.component"
+          vst3="$art/VST3/EQ-5.vst3"; au="$art/AU/EQ-5.component"
           phase "DSP, preset and state checks"
           quiet build-macos/VMETests_artefacts/Release/VMETests report
           phase "host test (JUCE's VST3 host: scan, audio, latency, power, state, rates, editor)"
@@ -55,31 +55,31 @@ jobs:
           for want in "EQ In = Off" "Low Peak Boost = 5.0" "Dip Freq = 7 kHz" "High Peak Freq = 2 kHz" "Power = Off"; do grep -q "$want" "$RUNNER_TEMP/pressed.txt"; done
           phase "check bundles, ad-hoc sign"
           for b in "$vst3" "$au"; do
-            bin="$b/Contents/MacOS/VALVE MID EQ-5"
+            bin="$b/Contents/MacOS/EQ-5"
             archs=$(lipo -archs "$bin"); echo "$b: $archs" >> "$log"
             [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
             quiet codesign --force --sign - "$b"
             quiet codesign --verify --strict "$b"
           done
-          nm -gU "$vst3/Contents/MacOS/VALVE MID EQ-5" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          nm -gU "$vst3/Contents/MacOS/EQ-5" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
           for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
           phase auval
           mkdir -p ~/Library/Audio/Plug-Ins/Components
-          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/"VALVE MID EQ-5.component"
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/"EQ-5.component"
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           auval -v aufx Vme5 Apho > "$RUNNER_TEMP/auval.txt" 2>&1 || true
           cat "$RUNNER_TEMP/auval.txt" >> "$log"
           grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
           phase package
           version=$(sed -nE 's/^project\(ValveMidEQ5 VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
-          mkdir -p "pkg/VALVE MID EQ-5"
-          ditto "$vst3" "pkg/VALVE MID EQ-5/VALVE MID EQ-5.vst3"
-          ditto "$au" "pkg/VALVE MID EQ-5/VALVE MID EQ-5.component"
-          cp release/THIRD-PARTY-NOTICES.txt "release/Install on Mac.txt" "pkg/VALVE MID EQ-5/"
-          ditto -c -k --sequesterRsrc --keepParent "pkg/VALVE MID EQ-5" "$RUNNER_TEMP/VALVE-MID-EQ-5-$version-Mac.zip"
-          ls -l "$RUNNER_TEMP/VALVE-MID-EQ-5-$version-Mac.zip" >> "$log"
-          [ "$(stat -f%z "$RUNNER_TEMP/VALVE-MID-EQ-5-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
-          phase "done: VALVE MID EQ-5 $version"
+          mkdir -p "pkg/EQ-5"
+          ditto "$vst3" "pkg/EQ-5/EQ-5.vst3"
+          ditto "$au" "pkg/EQ-5/EQ-5.component"
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt "release/Install on Mac.txt" "pkg/EQ-5/"
+          ditto -c -k --sequesterRsrc --keepParent "pkg/EQ-5" "$RUNNER_TEMP/EQ5-$version-Mac.zip"
+          ls -l "$RUNNER_TEMP/EQ5-$version-Mac.zip" >> "$log"
+          [ "$(stat -f%z "$RUNNER_TEMP/EQ5-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "done: EQ-5 $version"
 
       - name: Stage the package, editor pictures and log as a private draft release
         if: always()
@@ -87,7 +87,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=("$RUNNER_TEMP/build.log")
-          for f in "$RUNNER_TEMP"/VALVE-MID-EQ-5-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          for f in "$RUNNER_TEMP"/EQ5-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
           if [ -d "$RUNNER_TEMP/shots" ]; then (cd "$RUNNER_TEMP" && zip -q -r editor-pictures.zip shots) && files+=("$RUNNER_TEMP/editor-pictures.zip"); fi
-          gh release create "valvemideq5-mac-${{ github.run_id }}" --draft --title "VALVE MID EQ-5 macOS (run ${{ github.run_id }})" \
+          gh release create "valvemideq5-mac-${{ github.run_id }}" --draft --title "EQ-5 macOS (run ${{ github.run_id }})" \
             --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
