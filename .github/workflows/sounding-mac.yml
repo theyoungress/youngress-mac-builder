@@ -40,6 +40,8 @@ jobs:
           quiet cmake --build build-macos --config Release --parallel 4 -- -k
           phase "engine test (EBU Tech 3341 and 3342 test signals, true peak, analyser, voice index) on this Mac's processor"
           quiet build-macos/EngineTest
+          phase "glitch test (NaN, infinity and huge input, every rate and layout, settings changed every block, the analyser under it)"
+          quiet build-macos/GlitchTest 30
           phase "adapter test (parameters, untouched audio, meters, sidechain, state, editor drawing, mouse, wheel and keys)"
           quiet build-macos/PortableTest "$RUNNER_TEMP/shots"
           phase "check bundles, ad-hoc sign"
