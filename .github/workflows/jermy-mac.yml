@@ -1,0 +1,84 @@
+name: JERMY macOS
+
+# Builds JERMY for macOS on GitHub's free public-repo Mac runners, like hadal-mac.yml and lure-mac.yml: the private
+# source comes in with a read-only deploy key, all output goes to a log in a private draft release,
+# and the finished package is a private draft too (with pictures of the editor as the Mac drew it).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  jermy:
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/JERMY
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.JERMY_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test, sign, validate (auval, host test) and package
+        working-directory: src
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4 -- -k
+          phase "engine test (every circuit's harmonics, aliasing, levels, clicks, presets, every rate) on this Mac's processor"
+          quiet build-macos/EngineTest
+          phase "adapter test (parameters, engine-exact audio, the host's song, state, editor and mouse, licence)"
+          quiet build-macos/PortableTest "$RUNNER_TEMP/shots"
+          phase "check bundles, ad-hoc sign"
+          vst3=build-macos/macOS/JERMY.vst3
+          au="$(find build-macos -type d -name 'JERMY.component' | head -1)"
+          for b in "$vst3" "$au"; do
+            archs=$(lipo -archs "$b/Contents/MacOS/JERMY"); echo "$b: $archs" >> "$log"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            quiet codesign --force --sign - "$b"
+            quiet codesign --verify --strict "$b"
+          done
+          nm -gU "$vst3/Contents/MacOS/JERMY" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/JERMY.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx Jrmy YRes > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase "host test (JUCE's plug-in host loads the VST3 and the Audio Unit: audio, state, the editor in a window)"
+          quiet build-macos/JuceHostTest "$vst3" "$RUNNER_TEMP/shots"
+          phase package
+          version=$(sed -nE 's/^#define JERMY_VERSION "([0-9.]+)".*/\1/p' Source/Version.h)
+          mkdir -p pkg/JERMY
+          ditto "$vst3" pkg/JERMY/JERMY.vst3
+          ditto "$au" pkg/JERMY/JERMY.component
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt release/README.txt "release/Install on Mac.txt" pkg/JERMY/
+          ditto -c -k --sequesterRsrc --keepParent pkg/JERMY "$RUNNER_TEMP/JERMY-$version-Mac.zip"
+          [ "$(stat -f%z "$RUNNER_TEMP/JERMY-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "done: JERMY $version"
+
+      - name: Stage the package, the editor pictures and the log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/JERMY-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          if [ -d "$RUNNER_TEMP/shots" ]; then (cd "$RUNNER_TEMP" && zip -q -r editor-pictures.zip shots) && files+=("$RUNNER_TEMP/editor-pictures.zip"); fi
+          gh release create "jermy-mac-${{ github.run_id }}" --draft --title "JERMY macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
