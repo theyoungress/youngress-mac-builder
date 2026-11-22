@@ -45,8 +45,10 @@ jobs:
           phase "host test: the test build activated and locked (JUCE's VST3 host: audio, state, automation, editor, assertions)"
           quiet build-macos/PhoticHostTest_artefacts/Release/PhoticHostTest "$check"
           quiet build-macos/PhoticHostTest_artefacts/Release/PhoticHostTest "$check" --locked
-          phase "editor fuzz: random clicks, drags, wheels, keys and resizes with audio running"
+          phase "knob pictures as the editor joins them, against JUCE's own reading of their files"
           shots="$RUNNER_TEMP/shots"; mkdir -p "$shots"; snap=build-macos/PhoticSnapshot_artefacts/Release/PhoticSnapshot
+          quiet "$snap" "$shots/art.png" --check-art
+          phase "editor fuzz: random clicks, drags, wheels, keys and resizes with audio running"
           quiet "$snap" "$shots/fuzz-a.png" --seconds 1 --fuzz 3000 --seed 11
           quiet "$snap" "$shots/fuzz-b.png" --seconds 1 --curve --fuzz 3000 --seed 12
           phase "editor pictures as the Mac draws them"
