@@ -1,0 +1,95 @@
+name: PHOTIC macOS
+
+# Builds PHOTIC (a JUCE 8 + CMake project) for macOS on GitHub's free public-repo Mac runners, like
+# the other *-mac.yml here: the private source comes in with a read-only deploy key, all output goes
+# to a log in a private draft release, and the finished package is a private draft too.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source commit or branch"
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  photic:
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theyoungress/photic
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.PHOTIC_SOURCE_KEY }}
+          persist-credentials: false
+          path: src
+
+      - name: Build, test (DSP, host, editor fuzz and pictures), sign, validate (auval) and package
+        working-directory: src
+        timeout-minutes: 70
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"; : > "$log"
+          phase() { echo "== $1" | tee -a "$log"; }
+          quiet() { "$@" >> "$log" 2>&1; }
+          phase configure
+          quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          phase build
+          quiet cmake --build build-macos --config Release --parallel 4 --target Photic_VST3 Photic_AU PhoticCheck_VST3 PhoticTests PhoticHostTest PhoticSnapshot
+          art=build-macos/Photic_artefacts/Release
+          vst3="$art/VST3/PHOTIC.vst3"; au="$art/AU/PHOTIC.component"; check="build-macos/PhoticCheck_artefacts/Release/VST3/PHOTIC.vst3"
+          phase "DSP, state, threads, glitches and fuzz checks"
+          quiet build-macos/PhoticTests_artefacts/Release/PhoticTests
+          phase "host test: the test build activated and locked (JUCE's VST3 host: audio, state, automation, editor, assertions)"
+          quiet build-macos/PhoticHostTest_artefacts/Release/PhoticHostTest "$check"
+          quiet build-macos/PhoticHostTest_artefacts/Release/PhoticHostTest "$check" --locked
+          phase "editor fuzz: random clicks, drags, wheels, keys and resizes with audio running"
+          shots="$RUNNER_TEMP/shots"; mkdir -p "$shots"; snap=build-macos/PhoticSnapshot_artefacts/Release/PhoticSnapshot
+          quiet "$snap" "$shots/fuzz-a.png" --seconds 1 --fuzz 3000 --seed 11
+          quiet "$snap" "$shots/fuzz-b.png" --seconds 1 --curve --fuzz 3000 --seed 12
+          phase "editor pictures as the Mac draws them"
+          quiet "$snap" "$shots/1-vocal-2x.png" --preset "Pop Vocal Sheen" --scale 2
+          quiet "$snap" "$shots/2-curve.png" --preset "Mix Bus Weight And Air" --curve --do "move 760 520"
+          quiet "$snap" "$shots/3-pressed.png" --do "drag 301 296 301 250; click 1074 140; alt 159 194; click 744 32"
+          quiet "$snap" "$shots/4-not-activated.png" --preset "Vocal Air" --curve --locked
+          phase "check bundles, ad-hoc sign"
+          for b in "$vst3" "$au"; do
+            bin="$b/Contents/MacOS/PHOTIC"
+            archs=$(lipo -archs "$bin"); echo "$b: $archs" >> "$log"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            if grep -q PHOTIC_TEST_UNLICENSED "$bin"; then echo "the test switch is in the shipped plug-in" >> "$log"; exit 1; fi
+            quiet codesign --force --sign - "$b"
+            quiet codesign --verify --strict "$b"
+          done
+          nm -gU "$vst3/Contents/MacOS/PHOTIC" > "$RUNNER_TEMP/exports.txt"   # (grep -q on a pipe trips pipefail)
+          for s in _GetPluginFactory _bundleEntry _bundleExit; do grep -q "$s" "$RUNNER_TEMP/exports.txt"; done
+          phase auval
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          quiet ditto "$au" ~/Library/Audio/Plug-Ins/Components/"PHOTIC.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx Phtc Apho > "$RUNNER_TEMP/auval.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/auval.txt" >> "$log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.txt"
+          phase package
+          version=$(sed -nE 's/^project\(Photic VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          mkdir -p "pkg/PHOTIC"
+          ditto "$vst3" "pkg/PHOTIC/PHOTIC.vst3"
+          ditto "$au" "pkg/PHOTIC/PHOTIC.component"
+          cp release/LICENSE.txt release/THIRD-PARTY-NOTICES.txt release/README.txt "release/Install on Mac.txt" "pkg/PHOTIC/"
+          ditto -c -k --sequesterRsrc --keepParent "pkg/PHOTIC" "$RUNNER_TEMP/PHOTIC-$version-Mac.zip"
+          ls -l "$RUNNER_TEMP/PHOTIC-$version-Mac.zip" >> "$log"
+          [ "$(stat -f%z "$RUNNER_TEMP/PHOTIC-$version-Mac.zip")" -lt 50000000 ]   # the store's per-file upload limit
+          phase "done: PHOTIC $version"
+
+      - name: Stage the package, editor pictures and log as a private draft release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("$RUNNER_TEMP/build.log")
+          for f in "$RUNNER_TEMP"/PHOTIC-*-Mac.zip; do [ -f "$f" ] && files+=("$f"); done
+          if [ -d "$RUNNER_TEMP/shots" ]; then (cd "$RUNNER_TEMP" && zip -q -r editor-pictures.zip shots) && files+=("$RUNNER_TEMP/editor-pictures.zip"); fi
+          gh release create "photic-mac-${{ github.run_id }}" --draft --title "PHOTIC macOS (run ${{ github.run_id }})" \
+            --notes "Job status: ${{ job.status }}. Universal VST3 + AU, ad-hoc signed." "${files[@]}" -R "$GITHUB_REPOSITORY"
