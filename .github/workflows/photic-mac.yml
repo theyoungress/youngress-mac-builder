@@ -48,6 +48,10 @@ jobs:
           phase "knob pictures as the editor joins them, against JUCE's own reading of their files"
           shots="$RUNNER_TEMP/shots"; mkdir -p "$shots"; snap=build-macos/PhoticSnapshot_artefacts/Release/PhoticSnapshot
           quiet "$snap" "$shots/art.png" --check-art
+          phase "the window with a DAW around it: pictures kept, host touches, keyboard, size"
+          quiet "$snap" "$shots/ui.png" --check-ui
+          phase "timings on the Mac's renderer (for the report; never fails the build)"
+          "$snap" "$shots/bench.png" --bench >> "$log" 2>&1 || echo "bench did not finish" >> "$log"
           phase "editor fuzz: random clicks, drags, wheels, keys and resizes with audio running"
           quiet "$snap" "$shots/fuzz-a.png" --seconds 1 --fuzz 3000 --seed 11
           quiet "$snap" "$shots/fuzz-b.png" --seconds 1 --curve --fuzz 3000 --seed 12
