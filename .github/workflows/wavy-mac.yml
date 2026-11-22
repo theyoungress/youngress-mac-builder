@@ -37,12 +37,14 @@ jobs:
           phase configure
           quiet cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
           phase build
-          quiet cmake --build build-macos --config Release --parallel 4 --target Wavy_VST3 Wavy_AU WavyTests WavyHostTest WavySnapshot
+          quiet cmake --build build-macos --config Release --parallel 4 --target Wavy_VST3 Wavy_AU WavyTests WavyHunt WavyHostTest WavySnapshot
           art=build-macos/Wavy_artefacts/Release
           vst3="$art/VST3/WAVY.vst3"; au="$art/AU/WAVY.component"
           phase "listeners, settings, MIDI file, background job and state (also writes the made-up audio)"
           audio="$RUNNER_TEMP/audio"
           quiet build-macos/WavyTests_artefacts/Release/WavyTests --write "$audio"
+          phase "bug hunt: odd audio, formats, rates, threads, saved state, MIDI files, stalls"
+          quiet build-macos/WavyHunt_artefacts/Release/WavyHunt inputs formats rates races state midi timing
           phase "host test (JUCE's VST3 host: scan, buses, audio through untouched, state, rates, editor)"
           quiet build-macos/WavyHostTest_artefacts/Release/WavyHostTest "$vst3"
           phase "editor pictures as the Mac draws them, and the keys pressed"
